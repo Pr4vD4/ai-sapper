@@ -10,6 +10,8 @@ from logger_config import setup_logger
 import os
 from datetime import datetime
 from tkinter import Tk, filedialog
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from multiprocessing.pool import ThreadPool
 
 class AITrainer:
     def __init__(self):
@@ -31,6 +33,19 @@ class AITrainer:
         # Загружаем существующую модель, если это указано в конфиге
         if TRAINING_CONFIG['LOAD_EXISTING_MODEL']:
             self.load_existing_model()
+        
+        # Добавляем предварительное выделение памяти
+        self.preallocated_games = [
+            Minesweeper(
+                GAME_CONFIG['WIDTH'],
+                GAME_CONFIG['HEIGHT'],
+                GAME_CONFIG['NUM_MINES']
+            ) for _ in range(TRAINING_CONFIG['BATCH_SIZE'])
+        ]
+        
+        # Добавляем параллельную обработку
+        self.num_workers = os.cpu_count()
+        self.pool = ThreadPool(self.num_workers)
     
     def load_existing_model(self):
         """Загружает существующую модель через диалог выбора файла"""
@@ -234,6 +249,38 @@ class AITrainer:
             total_reward += reward
         
         return total_reward / num_games, wins / num_games
+
+    def train_model(self):
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=config.EARLY_STOPPING_PATIENCE,
+            restore_best_weights=True
+        )
+        
+        lr_reducer = ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=config.LEARNING_RATE_DECAY,
+            patience=5,
+            min_lr=1e-6
+        )
+        
+        history = self.model.fit(
+            self.X_train,
+            self.y_train,
+            batch_size=config.BATCH_SIZE,
+            epochs=config.EPOCHS,
+            validation_split=config.VALIDATION_SPLIT,
+            callbacks=[early_stopping, lr_reducer]
+        )
+
+    def train_batch_parallel(self, batch_indices):
+        """Параллельное обучение батча"""
+        results = self.pool.map(
+            self.train_single_episode,
+            [(i, self.preallocated_games[i % len(self.preallocated_games)])
+             for i in batch_indices]
+        )
+        return zip(*results)  # rewards, wins
 
 def main():
     trainer = AITrainer()

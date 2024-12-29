@@ -12,13 +12,13 @@ GAME_CONFIG = {
 # Параметры обучения
 TRAINING_CONFIG = {
     'NUM_EPISODES': 8000,
-    'BATCH_SIZE': 128,
+    'BATCH_SIZE': 64,
     'MEMORY_SIZE': 50000,
     'GAMMA': 0.99,
     'INITIAL_EPSILON': 1.0,
     'FINAL_EPSILON': 0.2,
     'EPSILON_DECAY': 0.999,
-    'LEARNING_RATE': 0.0005,
+    'LEARNING_RATE': 0.001,
     'TARGET_UPDATE_FREQ': 10,
     'LOAD_EXISTING_MODEL': False,
     'EPSILON_MIN_EPISODE': 2000,
@@ -67,4 +67,26 @@ CURRICULUM_CONFIG = {
         {'EPISODES': 200, 'WIDTH': 5, 'HEIGHT': 5, 'MINES': 3},
         {'EPISODES': 500, 'WIDTH': 6, 'HEIGHT': 6, 'MINES': 5}
     ]
+}
+
+# Добавляем новые параметры
+EARLY_STOPPING_PATIENCE = 10
+LEARNING_RATE_DECAY = 0.95
+VALIDATION_SPLIT = 0.2 
+
+# Добавляем параметры для оптимизации производительности
+PERFORMANCE_CONFIG = {
+    'USE_MIXED_PRECISION': True,
+    'CACHE_SIZE': 10000,
+    'NUM_WORKERS': 4,
+    'PREFETCH_FACTOR': 2,
+    'PIN_MEMORY': True,
+    'ASYNC_LOADING': True,
+    'OPTIMIZE_MEMORY': True,
+    
+    # Параметры для батчей
+    'ADAPTIVE_BATCH_SIZE': True,
+    'MIN_BATCH_SIZE': 32,
+    'MAX_BATCH_SIZE': 256,
+    'BATCH_GROWTH_RATE': 1.1
 } 

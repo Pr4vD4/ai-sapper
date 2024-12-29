@@ -7,6 +7,10 @@ import random
 from collections import deque
 from config import REWARD_CONFIG, LOGGING_CONFIG, TRAINING_CONFIG  # Добавляем импорт конфигурации наград и LOGGING_CONFIG
 from optimizations import calculate_state_vector, calculate_adjacent_value, find_safe_moves_fast
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, BatchNormalization, Flatten, Dense, Dropout
+from torch.cuda.amp import autocast, GradScaler
+import torch.nn.functional as F
 
 class MinesweeperNet(nn.Module):
     def __init__(self, input_size: int, hidden_size: int = 512):
@@ -42,7 +46,24 @@ class MinesweeperNet(nn.Module):
         # Убеждаемся, что входные данные имеют нужную размерность
         if x.dim() == 1:
             x = x.unsqueeze(0)  # Добавляем размерность батча
-        return self.network(x)
+        
+        output = self.network(x)
+        return output.squeeze() if output.size(0) == 1 else output
+
+    def build_model(self):
+        model = Sequential([
+            Conv2D(64, (3, 3), activation='relu', input_shape=self.input_shape, padding='same'),
+            BatchNormalization(),
+            Conv2D(128, (3, 3), activation='relu', padding='same'),
+            BatchNormalization(),
+            Conv2D(64, (3, 3), activation='relu', padding='same'),
+            BatchNormalization(),
+            Flatten(),
+            Dense(256, activation='relu'),
+            Dropout(0.3),  # Добавляем для предотвращения переобучения
+            Dense(self.output_size, activation='sigmoid')
+        ])
+        return model
 
 class MinesweeperAI:
     def __init__(self, width: int, height: int, num_mines: int):
@@ -95,6 +116,13 @@ class MinesweeperAI:
         
         self._state_cache = {}  # Кэш для состояний
         self._move_cache = {}   # Кэш для ходов
+        
+        # Добавляем scaler для mixed precision training
+        self.scaler = GradScaler()
+        
+        # Добавляем кэш для батчей
+        self.states_cache = {}
+        self.batch_cache = None
         
     def get_state(self, game) -> np.ndarray:
         """Кэшированная версия получения состояния"""
@@ -238,38 +266,62 @@ class MinesweeperAI:
         """Обучает нейронную сеть на основе сохраненного опыта"""
         if len(self.memory) < batch_size:
             return
-        
-        # Используем numpy для быстрой обработки батча
-        batch = random.sample(self.memory, batch_size)
-        states = np.vstack([exp[0] for exp in batch])
-        next_states = np.vstack([exp[3] for exp in batch])
-        
-        # Переводим в тензоры один раз
-        states = torch.FloatTensor(states).to(self.device)
-        next_states = torch.FloatTensor(next_states).to(self.device)
-        
-        # Получаем предсказания одним батчем
-        with torch.no_grad():
-            next_q_values = self.target_model(next_states)
-        
-        # Вычисляем целевые значения
-        targets = torch.zeros(batch_size, device=self.device)
-        for i, (_, _, reward, _, done, _) in enumerate(batch):  # Добавляем _ для priority
-            targets[i] = reward if done else reward + gamma * next_q_values[i]
-        
-        # Обучаем модель
+            
+        # Используем кэшированные батчи
+        cache_key = f"{batch_size}_{len(self.memory)}"
+        if self.batch_cache and self.batch_cache[0] == cache_key:
+            states, actions, rewards, next_states, dones = self.batch_cache[1]
+        else:
+            batch = random.sample(self.memory, batch_size)
+            # Сначала преобразуем список в numpy array
+            states_np = np.vstack([exp[0] for exp in batch])
+            actions_np = np.array([exp[1][0] * self.width + exp[1][1] for exp in batch])
+            rewards_np = np.array([exp[2] for exp in batch])
+            next_states_np = np.vstack([exp[3] for exp in batch])
+            dones_np = np.array([exp[4] for exp in batch])
+            
+            # Затем конвертируем в тензоры
+            states = torch.FloatTensor(states_np).to(self.device)
+            actions = torch.LongTensor(actions_np).to(self.device)
+            rewards = torch.FloatTensor(rewards_np).to(self.device)
+            next_states = torch.FloatTensor(next_states_np).to(self.device)
+            dones = torch.BoolTensor(dones_np).to(self.device)
+            self.batch_cache = (cache_key, (states, actions, rewards, next_states, dones))
+
+        # Используем mixed precision training
+        with torch.amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+            current_q_values = self.model(states)
+            with torch.no_grad():
+                next_q_values = self.target_model(next_states).squeeze()
+                next_q_values = next_q_values.max(dim=0)[0] if next_q_values.dim() > 1 else next_q_values
+            
+            # Вычисляем целевые значения
+            targets = rewards.clone()
+            targets[~dones] += gamma * next_q_values[~dones]
+            
+            # Получаем Q-значения для выбранных действий
+            current_q = current_q_values.squeeze()
+            
+            # Убеждаемся, что размерности совпадают
+            if current_q.dim() == 2:
+                current_q = current_q.gather(1, actions.unsqueeze(1)).squeeze(1)
+            else:
+                current_q = current_q[actions]
+            
+            loss = F.smooth_l1_loss(current_q, targets)
+
+        # Оптимизация с использованием gradient scaling
         self.optimizer.zero_grad()
-        current_q_values = self.model(states)
-        loss = self.criterion(current_q_values.squeeze(), targets)
-        loss.backward()
-        self.optimizer.step()
+        self.scaler.scale(loss).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
         
         self.batch_losses.append(loss.item())
         
         if hasattr(self, 'logger'):
             self.logger.debug(f"Batch loss: {loss.item():.6f}")
             
-        # Обновляем целевую сеть каждые 10 батчей
+        # Обновляем целевую сеть
         self.update_target_counter += 1
         if self.update_target_counter % 10 == 0:
             self.update_target_network()

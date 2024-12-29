@@ -1,17 +1,48 @@
 from numba import jit, prange
 import numpy as np
+import logging
+from datetime import datetime
 
-@jit(nopython=True, parallel=True)
+def setup_logging():
+    logging.basicConfig(
+        filename=f'logs/training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log',
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+def log_training_metrics(epoch, metrics):
+    logging.info(f"Epoch {epoch}")
+    logging.info(f"Loss: {metrics['loss']:.4f}")
+    logging.info(f"Accuracy: {metrics['accuracy']:.4f}")
+    logging.info(f"Validation Loss: {metrics['val_loss']:.4f}")
+    logging.info(f"Validation Accuracy: {metrics['val_accuracy']:.4f}")
+
+@jit(nopython=True, parallel=True, fastmath=True)
 def calculate_state_vector(revealed_array, adjacent_mines_array, width, height):
-    """Оптимизированная версия с параллельным выполнением"""
+    """Оптимизированная версия с использованием fastmath"""
     state = np.zeros(width * height * 2, dtype=np.float32)
     
-    for y in prange(height):  # Используем parallel range
+    for y in prange(height):
+        start_idx = y * width * 2
         for x in range(width):
-            idx = (y * width + x) * 2
+            idx = start_idx + x * 2
             state[idx] = revealed_array[y, x]
             state[idx + 1] = adjacent_mines_array[y, x] / 8.0 if revealed_array[y, x] else 0.0
     return state
+
+@jit(nopython=True, cache=True, fastmath=True)
+def batch_process_states(states_list, width, height):
+    """Пакетная обработка состояний"""
+    batch_size = len(states_list)
+    result = np.zeros((batch_size, width * height * 2), dtype=np.float32)
+    
+    for i in prange(batch_size):
+        result[i] = calculate_state_vector(
+            states_list[i][0],  # revealed_array
+            states_list[i][1],  # adjacent_mines_array
+            width, height
+        )
+    return result
 
 @jit(nopython=True, cache=True)
 def calculate_adjacent_value(revealed_array, adjacent_mines_array, x, y, width, height):
