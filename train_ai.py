@@ -12,6 +12,7 @@ from datetime import datetime
 from tkinter import Tk, filedialog
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from multiprocessing.pool import ThreadPool
+import torch
 
 class AITrainer:
     def __init__(self):
@@ -134,6 +135,34 @@ class AITrainer:
         self.logger.info(f"  Epsilon decay:   {TRAINING_CONFIG['EPSILON_DECAY']}")
         self.logger.info("=" * 50 + "\n")
         
+        # Добавляем нормализацию входных данных
+        def normalize_state(state):
+            return (state - state.mean()) / (state.std() + 1e-8)
+
+        # Добавляем валидацию
+        def validate(self, num_games=100):
+            wins = 0
+            total_reward = 0
+            
+            # Переключаем модель в режим оценки
+            self.ai.model.eval()
+            
+            with torch.no_grad():
+                for _ in range(num_games):
+                    game = Minesweeper(
+                        GAME_CONFIG['WIDTH'],
+                        GAME_CONFIG['HEIGHT'],
+                        GAME_CONFIG['NUM_MINES']
+                    )
+                    reward, won = self.ai.play_episode(game, epsilon=0.05, training=False)
+                    wins += int(won)
+                    total_reward += reward
+            
+            # Возвращаем модель в режим обучения
+            self.ai.model.train()
+            
+            return total_reward / num_games, wins / num_games
+
         epsilon = TRAINING_CONFIG['INITIAL_EPSILON']
         total_rewards = []
         wins = 0
@@ -142,6 +171,7 @@ class AITrainer:
         best_win_rate = 0
         patience = 0
         max_patience = 10
+        current_win_rate = 0  # Добавляем переменную для отслеживания текущего win rate
         
         for episode in range(TRAINING_CONFIG['NUM_EPISODES']):
             episode_start = datetime.now()
@@ -152,9 +182,18 @@ class AITrainer:
                 GAME_CONFIG['NUM_MINES']
             )
             
+            if episode < TRAINING_CONFIG['WARMUP_EPISODES']:
+                epsilon = 1.0
+            else:
+                state = normalize_state(self.ai.get_state(game))
+            
             reward, won = self.ai.play_episode(game, epsilon)
             total_rewards.append(reward)
             wins += int(won)
+            
+            # Вычисляем текущий win rate после каждого эпизода
+            if episode > 0:
+                current_win_rate = wins / min(episode + 1, LOGGING_CONFIG['LOG_INTERVAL'])
             
             episode_time = (datetime.now() - episode_start).total_seconds()
             episode_times.append(episode_time)
@@ -165,23 +204,21 @@ class AITrainer:
                 epsilon * TRAINING_CONFIG['EPSILON_DECAY']
             )
             
-            # Сохраняем промежуточную модель
-            if (LOGGING_CONFIG['SAVE_CHECKPOINTS'] and 
-                (episode + 1) % LOGGING_CONFIG['CHECKPOINT_INTERVAL'] == 0):
-                checkpoint_path = os.path.join(
-                    LOGGING_CONFIG['SAVE_DIR'],
-                    f'checkpoint_ep{episode + 1}.pth'
-                )
-                self.ai.save_model(checkpoint_path)
-                self.logger.info(f"\nСохранен чекпоинт модели:")
-                self.logger.info(f"  {checkpoint_path}")
+            # Сохраняем чекпоинты
+            if episode % 1000 == 0:
+                checkpoint_path = f"models/checkpoint_episode_{episode}.pth"
+                save_checkpoint(self.ai, self.ai.optimizer, episode, current_win_rate, checkpoint_path)
+                
+                # Проводим валидацию
+                val_reward, val_win_rate = self.validate(num_games=100)
+                self.logger.info(f"Validation: reward={val_reward:.2f}, win_rate={val_win_rate:.2%}")
             
             # Логируем прогресс
             if (episode + 1) % LOGGING_CONFIG['LOG_INTERVAL'] == 0:
                 interval = LOGGING_CONFIG['LOG_INTERVAL']
-                # Берем только значения за последний интервал
                 avg_reward = sum(total_rewards[-interval:]) / interval
                 win_rate = wins / interval
+                current_win_rate = win_rate  # Обновляем текущий win rate
                 avg_time = sum(episode_times[-interval:]) / interval
                 elapsed_time = datetime.now() - start_time
                 current_lr = self.ai.get_current_lr()
@@ -205,7 +242,6 @@ class AITrainer:
                 else:
                     patience += 1
                     
-                # Early stopping
                 if patience >= max_patience:
                     self.logger.info("Остановка обучения: нет улучшений")
                     break
@@ -238,15 +274,22 @@ class AITrainer:
         wins = 0
         total_reward = 0
         
-        for _ in range(num_games):
-            game = Minesweeper(
-                GAME_CONFIG['WIDTH'],
-                GAME_CONFIG['HEIGHT'],
-                GAME_CONFIG['NUM_MINES']
-            )
-            reward, won = self.ai.play_episode(game, epsilon=0.05)
-            wins += int(won)
-            total_reward += reward
+        # Переключаем модель в режим оценки
+        self.ai.model.eval()
+        
+        with torch.no_grad():
+            for _ in range(num_games):
+                game = Minesweeper(
+                    GAME_CONFIG['WIDTH'],
+                    GAME_CONFIG['HEIGHT'],
+                    GAME_CONFIG['NUM_MINES']
+                )
+                reward, won = self.ai.play_episode(game, epsilon=0.05, training=False)
+                wins += int(won)
+                total_reward += reward
+        
+        # Возвращаем модель в режим обучения
+        self.ai.model.train()
         
         return total_reward / num_games, wins / num_games
 
@@ -281,6 +324,38 @@ class AITrainer:
              for i in batch_indices]
         )
         return zip(*results)  # rewards, wins
+
+def save_checkpoint(ai_agent, optimizer, episode, win_rate, path):
+    """
+    Сохраняет состояние обучения в чекпоинт
+    
+    Args:
+        ai_agent: объект MinesweeperAI
+        optimizer: оптимизатор
+        episode: текущий эпизод
+        win_rate: текущий процент побед
+        path: путь для сохранения чекпоинта
+    """
+    torch.save({
+        'episode': episode,
+        'model_state_dict': ai_agent.model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'win_rate': win_rate
+    }, path)
+
+def load_checkpoint(ai_agent, optimizer, path):
+    """
+    Загружает состояние обучения из чекпоинта
+    
+    Args:
+        ai_agent: объект MinesweeperAI
+        optimizer: оптимизатор
+        path: путь к чекпоинту
+    """
+    checkpoint = torch.load(path)
+    ai_agent.model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    return checkpoint['episode'], checkpoint['win_rate']
 
 def main():
     trainer = AITrainer()

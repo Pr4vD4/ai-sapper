@@ -3,6 +3,8 @@ from typing import List, Tuple
 import pygame
 import sys
 
+from config import GAME_CONFIG
+
 class Cell:
     def __init__(self):
         self.is_mine = False
@@ -251,5 +253,5 @@ class MinesweeperGUI:
 
 if __name__ == '__main__':
     # Создаем игру 9x9 с 10 минами
-    game_gui = MinesweeperGUI(4, 4, 2)
+    game_gui = MinesweeperGUI(GAME_CONFIG['WIDTH'], GAME_CONFIG['HEIGHT'], GAME_CONFIG['NUM_MINES'])
     game_gui.run()

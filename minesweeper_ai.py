@@ -13,7 +13,7 @@ from torch.cuda.amp import autocast, GradScaler
 import torch.nn.functional as F
 
 class MinesweeperNet(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int = 512):
+    def __init__(self, input_size: int, hidden_size: int = 256):
         """
         Инициализация нейронной сети
         
@@ -25,29 +25,49 @@ class MinesweeperNet(nn.Module):
         
         # Создаем полносвязную нейронную сеть
         self.network = nn.Sequential(
+            # Входной слой
             nn.Linear(input_size, hidden_size),
             nn.LayerNorm(hidden_size),
-            nn.LeakyReLU(),
-            nn.Dropout(0.2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
             
+            # Скрытые слои
             nn.Linear(hidden_size, hidden_size * 2),
             nn.LayerNorm(hidden_size * 2),
-            nn.LeakyReLU(),
-            nn.Dropout(0.2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
             
-            nn.Linear(hidden_size * 2, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.LeakyReLU(),
+            # Выходной слой
+            nn.Linear(hidden_size * 2, input_size // 2),
+            nn.LayerNorm(input_size // 2),
+            nn.ReLU(),
             
-            nn.Linear(hidden_size, 1)
+            nn.Linear(input_size // 2, input_size // 2)  # Q-значения для каждой клетки
         )
+        
+        # Инициализация весов
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
 
     def forward(self, x):
         # Убеждаемся, что входные данные имеют нужную размерность
         if x.dim() == 1:
             x = x.unsqueeze(0)  # Добавляем размерность батча
         
-        output = self.network(x)
+        # Добавляем проверку размерности
+        if x.size(0) == 1 and self.training:
+            # Если в режиме обучения и batch_size=1, дублируем входные данные
+            x = x.repeat(2, 1)
+            output = self.network(x)
+            output = output[0].unsqueeze(0)
+        else:
+            output = self.network(x)
+        
         return output.squeeze() if output.size(0) == 1 else output
 
     def build_model(self):
@@ -182,49 +202,39 @@ class MinesweeperAI:
 
     def choose_action(self, game, epsilon: float = 0.1) -> Tuple[int, int]:
         """Оптимизированная версия выбора действия"""
-        revealed_array = np.array([[cell.is_revealed for cell in row] for row in game.board], dtype=np.bool_)
-        adjacent_mines_array = np.array([[cell.adjacent_mines for cell in row] for row in game.board], dtype=np.int8)
-        
-        # Первый ход в центр
-        if not revealed_array.any():
-            return (self.width // 2, self.height // 2)
-        
-        # Поиск безопасных ходов
-        safe_moves = find_safe_moves_fast(revealed_array, adjacent_mines_array, self.width, self.height)
-        if safe_moves and random.random() > epsilon * 0.5:
-            return random.choice(safe_moves)
-        
-        if random.random() < epsilon:
-            available_moves = [(x, y) for y in range(self.height) for x in range(self.width) 
-                              if not revealed_array[y, x]]
+        if random.random() < epsilon:  # Исследование
+            available_moves = [(x, y) for y in range(self.height) 
+                             for x in range(self.width) 
+                             if not game.board[y][x].is_revealed]
             return random.choice(available_moves)
         
-        # Оцениваем все ходы одним батчем
+        # Эксплуатация: оцениваем все возможные ходы сразу
         state = self.get_state(game)
-        state_tensor = torch.from_numpy(state).to(self.device)
+        state_tensor = torch.FloatTensor(state).to(self.device)
         
+        # Создаем маску для доступных ходов
         available_moves = []
-        states_batch = []
+        move_mask = torch.zeros(self.width * self.height).to(self.device)
         
         for y in range(self.height):
             for x in range(self.width):
-                if not revealed_array[y, x]:
+                if not game.board[y][x].is_revealed:
+                    idx = y * self.width + x
                     available_moves.append((x, y))
-                    temp_state = state_tensor.clone()
-                    idx = (y * self.width + x) * 2
-                    temp_state[idx] = 1.0
-                    temp_state[idx + 1] = calculate_adjacent_value(revealed_array, adjacent_mines_array, x, y, self.width, self.height)
-                    states_batch.append(temp_state)
+                    move_mask[idx] = 1
         
-        if not available_moves:
-            raise ValueError("Нет доступных ходов")
-        
-        # Оцениваем все состояния одним батчем
-        states_batch = torch.stack(states_batch)
         with torch.no_grad():
-            values = self.model(states_batch).squeeze()
-        
-        return available_moves[values.argmax().item()]
+            self.model.eval()  # Переключаем в режим оценки
+            q_values = self.model(state_tensor)
+            self.model.train()  # Возвращаем в режим обучения
+            
+            # Маскируем недоступные ходы
+            q_values = q_values * move_mask
+            best_move_idx = q_values.argmax().item()
+            x = best_move_idx % self.width
+            y = best_move_idx // self.width
+            
+        return (x, y)
 
     def is_safe_move(self, game, x: int, y: int) -> bool:
         """Оптимизированная версия проверки безопасности хода"""
@@ -263,99 +273,87 @@ class MinesweeperAI:
         self.memory.append((state, action, reward, next_state, done, priority))
 
     def train(self, batch_size: int = 32, gamma: float = 0.95):
-        """Обучает нейронную сеть на основе сохраненного опыта"""
+        """Улучшенная функция обучения"""
         if len(self.memory) < batch_size:
             return
-            
-        # Используем кэшированные батчи
-        cache_key = f"{batch_size}_{len(self.memory)}"
-        if self.batch_cache and self.batch_cache[0] == cache_key:
-            states, actions, rewards, next_states, dones = self.batch_cache[1]
-        else:
-            batch = random.sample(self.memory, batch_size)
-            # Сначала преобразуем список в numpy array
-            states_np = np.vstack([exp[0] for exp in batch])
-            actions_np = np.array([exp[1][0] * self.width + exp[1][1] for exp in batch])
-            rewards_np = np.array([exp[2] for exp in batch])
-            next_states_np = np.vstack([exp[3] for exp in batch])
-            dones_np = np.array([exp[4] for exp in batch])
-            
-            # Затем конвертируем в тензоры
-            states = torch.FloatTensor(states_np).to(self.device)
-            actions = torch.LongTensor(actions_np).to(self.device)
-            rewards = torch.FloatTensor(rewards_np).to(self.device)
-            next_states = torch.FloatTensor(next_states_np).to(self.device)
-            dones = torch.BoolTensor(dones_np).to(self.device)
-            self.batch_cache = (cache_key, (states, actions, rewards, next_states, dones))
-
-        # Используем mixed precision training
-        with torch.amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
-            current_q_values = self.model(states)
-            with torch.no_grad():
-                next_q_values = self.target_model(next_states).squeeze()
-                next_q_values = next_q_values.max(dim=0)[0] if next_q_values.dim() > 1 else next_q_values
-            
-            # Вычисляем целевые значения
-            targets = rewards.clone()
-            targets[~dones] += gamma * next_q_values[~dones]
-            
-            # Получаем Q-значения для выбранных действий
-            current_q = current_q_values.squeeze()
-            
-            # Убеждаемся, что размерности совпадают
-            if current_q.dim() == 2:
-                current_q = current_q.gather(1, actions.unsqueeze(1)).squeeze(1)
-            else:
-                current_q = current_q[actions]
-            
-            loss = F.smooth_l1_loss(current_q, targets)
-
-        # Оптимизация с использованием gradient scaling
+        
+        # Выбираем опыт с приоритетом
+        experiences = sorted(self.memory, key=lambda x: x[5], reverse=True)[:batch_size]
+        # Исправляем распаковку, игнорируя priority
+        states, actions, rewards, next_states, dones, _ = zip(*experiences)
+        
+        # Преобразуем в тензоры
+        states = torch.FloatTensor(np.array(states)).to(self.device)
+        actions = torch.LongTensor([(a[1] * self.width + a[0]) for a in actions]).to(self.device)
+        rewards = torch.FloatTensor(rewards).to(self.device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        dones = torch.BoolTensor(dones).to(self.device)
+        
+        # Double DQN
+        with torch.no_grad():
+            next_actions = self.model(next_states).max(1)[1]
+            next_q_values = self.target_model(next_states).gather(1, next_actions.unsqueeze(1))
+            target_q_values = rewards + (gamma * next_q_values.squeeze() * ~dones)
+        
+        # Получаем текущие Q-значения
+        current_q_values = self.model(states).gather(1, actions.unsqueeze(1))
+        
+        # Вычисляем loss с использованием Huber Loss
+        loss = F.smooth_l1_loss(current_q_values, target_q_values.unsqueeze(1))
+        
+        # Оптимизация
         self.optimizer.zero_grad()
-        self.scaler.scale(loss).backward()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        loss.backward()
+        # Градиентный клиппинг для стабильности
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.optimizer.step()
         
-        self.batch_losses.append(loss.item())
-        
-        if hasattr(self, 'logger'):
-            self.logger.debug(f"Batch loss: {loss.item():.6f}")
-            
         # Обновляем целевую сеть
-        self.update_target_counter += 1
-        if self.update_target_counter % 10 == 0:
+        if self.update_target_counter % TRAINING_CONFIG['TARGET_UPDATE_FREQ'] == 0:
             self.update_target_network()
+        self.update_target_counter += 1
 
     def calculate_reward(self, game, action: Tuple[int, int], prev_revealed: int) -> float:
-        """Оптимизированная версия вычисления наград"""
+        """Улучшенная система наград"""
         x, y = action
         cell = game.board[y][x]
         
         if game.won:
-            return REWARD_CONFIG['WIN']
+            return 100.0  # Большая награда за победу
+        
         if game.game_over:
-            return REWARD_CONFIG['LOSS']
+            return -100.0  # Большой штраф за проигрыш
         
-        # Создаем массив для подсчета открытых клеток
-        revealed_array = np.array([[cell.is_revealed for cell in row] for row in game.board], dtype=np.bool_)
-        current_revealed = np.sum(revealed_array)
-        cells_revealed = current_revealed - prev_revealed
+        # Награда за открытие безопасных клеток
+        cells_revealed = sum(1 for row in game.board 
+                            for c in row if c.is_revealed) - prev_revealed
         
-        reward = REWARD_CONFIG['SAFE_MOVE'] * cells_revealed
-        if cell.adjacent_mines == 0:
-            reward += REWARD_CONFIG['PROGRESS_BONUS']
-        elif cell.adjacent_mines > 0:
-            reward += REWARD_CONFIG['HINT_BONUS']
+        base_reward = cells_revealed * 5.0  # Базовая награда за открытие клеток
         
-        return reward
+        # Дополнительные награды
+        if cell.adjacent_mines == 0:  # Открыли пустую клетку
+            base_reward += 10.0
+        elif cell.adjacent_mines > 0:  # Открыли клетку с числом
+            base_reward += 5.0
+        
+        # Штраф за рискованные ходы
+        if not self.is_safe_move(game, x, y):
+            base_reward -= 2.0
+        
+        return base_reward
 
-    def play_episode(self, game, epsilon: float = 0.1) -> Tuple[float, bool]:
+    def play_episode(self, game, epsilon: float = 0.1, training: bool = True) -> Tuple[float, bool]:
         """
         Проигрывает один эпизод игры
+        
+        Args:
+            game: игровое поле
+            epsilon: параметр исследования
+            training: флаг режима обучения
         """
         total_reward = 0
         game_over = False
-        self.moves = 0  # Добавляем счетчик ходов
+        self.moves = 0
         
         while not game_over:
             self.moves += 1
@@ -363,23 +361,18 @@ class MinesweeperAI:
             prev_revealed = sum(1 for row in game.board 
                               for cell in row if cell.is_revealed)
             
-            # Проверяем условие победы до хода
-            safe_unopened = sum(1 for row in game.board 
-                              for cell in row 
-                              if not cell.is_mine and not cell.is_revealed)
-            
             action = self.choose_action(game, epsilon)
             game.reveal(action[0], action[1])
             
-            # Проверяем условие победы после хода
             reward = self.calculate_reward(game, action, prev_revealed)
             next_state = self.get_state(game)
             game_over = game.game_over
             
-            self.remember(current_state, action, reward, next_state, game_over)
-            
-            if len(self.memory) >= self.batch_size:
-                self.train(batch_size=self.batch_size)
+            if training:
+                self.remember(current_state, action, reward, next_state, game_over)
+                
+                if len(self.memory) >= self.batch_size:
+                    self.train(batch_size=self.batch_size)
             
             total_reward += reward
         
@@ -416,3 +409,29 @@ class MinesweeperAI:
             return {'WIDTH': 5, 'HEIGHT': 5, 'NUM_MINES': 3}
         else:
             return {'WIDTH': 6, 'HEIGHT': 6, 'NUM_MINES': 5} 
+
+    def pretrain_on_safe_moves(self, num_games=1000):
+        """Предварительное обучение на безопасных ходах"""
+        for _ in range(num_games):
+            game = Minesweeper(self.width, self.height, self.num_mines)
+            state = self.get_state(game)
+            
+            # Первый ход всегда в центр
+            x, y = self.width // 2, self.height // 2
+            game.reveal(x, y)
+            
+            while not game.game_over:
+                safe_moves = self.find_safe_moves(game)
+                if not safe_moves:
+                    break
+                    
+                next_move = random.choice(safe_moves)
+                next_state = self.get_state(game)
+                reward = 1.0  # Награда за безопасный ход
+                
+                self.remember(state, next_move, reward, next_state, False)
+                if len(self.memory) >= self.batch_size:
+                    self.train(self.batch_size)
+                    
+                state = next_state
+                game.reveal(next_move[0], next_move[1]) 
