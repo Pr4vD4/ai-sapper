@@ -26,6 +26,7 @@ class AITrainer:
         
         self.best_reward = float('-inf')
         self.best_model_path = None
+        self.best_win_rate = 0
         
         # Загружаем существующую модель, если это указано в конфиге
         if TRAINING_CONFIG['LOAD_EXISTING_MODEL']:
@@ -69,6 +70,34 @@ class AITrainer:
             )
             self.ai.save_model(self.best_model_path)
     
+    def save_best_model(self, win_rate: float):
+        """
+        Сохраняет модель, если она показала лучший результат
+        
+        Args:
+            win_rate: текущий процент побед
+        """
+        if win_rate > self.best_win_rate:
+            self.best_win_rate = win_rate
+            
+            # Создаем имя файла с процентом побед
+            model_name = f'model_best_winrate_{win_rate:.3f}.pth'
+            save_path = os.path.join(LOGGING_CONFIG['SAVE_DIR'], model_name)
+            
+            # Удаляем предыдущую лучшую модель
+            if self.best_model_path and os.path.exists(self.best_model_path):
+                try:
+                    os.remove(self.best_model_path)
+                except OSError as e:
+                    self.logger.warning(f"Не удалось удалить предыдущую модель: {e}")
+            
+            # Сохраняем новую лучшую модель
+            self.ai.save_model(save_path)
+            self.best_model_path = save_path
+            
+            self.logger.info(f"\nНовая лучшая модель (win rate: {win_rate:.1%}):")
+            self.logger.info(f"  {save_path}")
+    
     def train(self):
         """Обучение ИИ"""
         self.logger.info("=" * 50)
@@ -95,6 +124,9 @@ class AITrainer:
         wins = 0
         episode_times = []
         start_time = datetime.now()
+        best_win_rate = 0
+        patience = 0
+        max_patience = 10
         
         for episode in range(TRAINING_CONFIG['NUM_EPISODES']):
             episode_start = datetime.now()
@@ -150,6 +182,18 @@ class AITrainer:
                 self.logger.info("-" * 50 + "\n")
                 
                 wins = 0  # Сбрасываем счетчик побед
+                
+                if win_rate > best_win_rate:
+                    best_win_rate = win_rate
+                    self.save_best_model(win_rate)
+                    patience = 0
+                else:
+                    patience += 1
+                    
+                # Early stopping
+                if patience >= max_patience:
+                    self.logger.info("Остановка обучения: нет улучшений")
+                    break
         
         # Итоговая статистика
         total_time = datetime.now() - start_time
@@ -173,6 +217,23 @@ class AITrainer:
         self.logger.info(f"\nФинальная модель сохранена в:")
         self.logger.info(f"  {save_path}")
         self.logger.info("=" * 50)
+
+    def validate(self, num_games=100):
+        """Проверка модели на тестовых играх"""
+        wins = 0
+        total_reward = 0
+        
+        for _ in range(num_games):
+            game = Minesweeper(
+                GAME_CONFIG['WIDTH'],
+                GAME_CONFIG['HEIGHT'],
+                GAME_CONFIG['NUM_MINES']
+            )
+            reward, won = self.ai.play_episode(game, epsilon=0.05)
+            wins += int(won)
+            total_reward += reward
+        
+        return total_reward / num_games, wins / num_games
 
 def main():
     trainer = AITrainer()

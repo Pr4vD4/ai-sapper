@@ -76,10 +76,12 @@ class MinesweeperAI:
         
         # Добавляем scheduler для динамического изменения learning rate
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, 
+            self.optimizer,
             mode='max',
             factor=0.5,
             patience=5,
+            min_lr=1e-6,
+            verbose=True
         )
         
         # Инициализируем память с указанным размером

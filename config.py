@@ -11,16 +11,20 @@ GAME_CONFIG = {
 
 # Параметры обучения
 TRAINING_CONFIG = {
-    'NUM_EPISODES': 5000,
-    'BATCH_SIZE': 64,
+    'NUM_EPISODES': 8000,
+    'BATCH_SIZE': 128,
     'MEMORY_SIZE': 50000,
     'GAMMA': 0.99,
     'INITIAL_EPSILON': 1.0,
-    'FINAL_EPSILON': 0.1,
-    'EPSILON_DECAY': 0.997,
+    'FINAL_EPSILON': 0.2,
+    'EPSILON_DECAY': 0.999,
     'LEARNING_RATE': 0.0005,
     'TARGET_UPDATE_FREQ': 10,
-    'LOAD_EXISTING_MODEL': True
+    'LOAD_EXISTING_MODEL': False,
+    'EPSILON_MIN_EPISODE': 2000,
+    'PRIORITIZED_REPLAY': True,
+    'DOUBLE_DQN': True,
+    'CURRICULUM_LEARNING': False
 }
 
 # Параметры нейронной сети
@@ -41,7 +45,9 @@ REWARD_CONFIG = {
     'PROGRESS_BONUS': 5.0,
     'EARLY_GAME_BONUS': 1.0,
     'PATTERN_BONUS': 2.0,
-    'RISKY_MOVE_PENALTY': -1.0
+    'RISKY_MOVE_PENALTY': -1.0,
+    'CONSECUTIVE_SAFE_BONUS': 1.0,
+    'EXPLORATION_BONUS': 0.5,
 }
 
 # Параметры логирования и сохранения
