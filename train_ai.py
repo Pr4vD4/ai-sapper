@@ -131,9 +131,11 @@ class AITrainer:
             
             # Логируем прогресс
             if (episode + 1) % LOGGING_CONFIG['LOG_INTERVAL'] == 0:
-                avg_reward = sum(total_rewards[-100:]) / 100
-                win_rate = wins / LOGGING_CONFIG['LOG_INTERVAL']
-                avg_time = sum(episode_times[-100:]) / 100
+                interval = LOGGING_CONFIG['LOG_INTERVAL']
+                # Берем только значения за последний интервал
+                avg_reward = sum(total_rewards[-interval:]) / interval
+                win_rate = wins / interval
+                avg_time = sum(episode_times[-interval:]) / interval
                 elapsed_time = datetime.now() - start_time
                 current_lr = self.ai.get_current_lr()
                 
@@ -147,7 +149,7 @@ class AITrainer:
                 self.logger.info(f"Время на эпизод: {avg_time:.3f} сек")
                 self.logger.info("-" * 50 + "\n")
                 
-                wins = 0
+                wins = 0  # Сбрасываем счетчик побед
         
         # Итоговая статистика
         total_time = datetime.now() - start_time

@@ -4,14 +4,14 @@
 
 # Параметры игрового поля
 GAME_CONFIG = {
-    'WIDTH': 6,
-    'HEIGHT': 6,
-    'NUM_MINES': 5
+    'WIDTH': 4,
+    'HEIGHT': 4,
+    'NUM_MINES': 2
 }
 
 # Параметры обучения
 TRAINING_CONFIG = {
-    'NUM_EPISODES': 2000,
+    'NUM_EPISODES': 5000,
     'BATCH_SIZE': 64,
     'MEMORY_SIZE': 50000,
     'GAMMA': 0.99,
@@ -20,7 +20,7 @@ TRAINING_CONFIG = {
     'EPSILON_DECAY': 0.997,
     'LEARNING_RATE': 0.0005,
     'TARGET_UPDATE_FREQ': 10,
-    'LOAD_EXISTING_MODEL': False
+    'LOAD_EXISTING_MODEL': True
 }
 
 # Параметры нейронной сети
@@ -48,7 +48,7 @@ REWARD_CONFIG = {
 LOGGING_CONFIG = {
     'LOG_DIR': 'logs',
     'SAVE_DIR': 'models',  # Директория для сохранения моделей
-    'LOG_INTERVAL': 100,   # Интервал для логирования статистики
+    'LOG_INTERVAL': 500,   # Интервал для логирования статистики
     'SAVE_CHECKPOINTS': False,  # Сохранять ли промежуточные модели
     'CHECKPOINT_INTERVAL': 200,  # Каждые сколько эпизодов сохранять модель
     'SHOW_WIN_BOARD': True,     # Показывать ли состояние поля при победе

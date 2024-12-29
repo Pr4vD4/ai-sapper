@@ -251,5 +251,5 @@ class MinesweeperGUI:
 
 if __name__ == '__main__':
     # Создаем игру 9x9 с 10 минами
-    game_gui = MinesweeperGUI(6, 6, 5)
+    game_gui = MinesweeperGUI(4, 4, 2)
     game_gui.run()
